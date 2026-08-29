@@ -105,13 +105,13 @@ exec($command, $output, $exitCode);
 $timedOut = $exitCode === 124;
 
 if ($isMutation) {
-    $resultRecord = $auditBase + [
+    $resultRecord = array_merge($auditBase, [
         'timestamp' => gmdate('c'),
         'event' => 'result',
         'exit_code' => $exitCode,
         'timed_out' => $timedOut,
         'output' => array_slice($output, 0, 50),
-    ];
+    ]);
 
     if (!appendAudit($auditLog, $resultRecord)) {
         error_log(sprintf('nethandle audit result write failed request_id=%s exit_code=%d', $requestId, $exitCode));
