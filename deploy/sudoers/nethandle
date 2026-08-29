@@ -1,0 +1,4 @@
+# Install as /etc/sudoers.d/nethandle and validate with visudo -cf.
+# Adjust the Apache account and binary path if the gateway differs.
+
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nethandle
