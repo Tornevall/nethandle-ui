@@ -1,86 +1,165 @@
-# nethandle-web (planning baseline)
+# nethandle-ui
 
-Web UI and API bridge for controlling internet access per user/device using the existing `nethandle` and `run-nethandle` scripts.
+Minimal gateway-side web bridge for the existing `nethandle` command.
 
-## Goal
+The first implementation is intentionally independent of Laravel and ToolsAPI. Apache/PHP receives a small authenticated request and executes the already existing operator command:
 
-Build a secure web-to-terminal control surface in Tools without breaking current router-side script workflows.
+```text
+nethandle <target> on
+nethandle <target> off
+nethandle <target> status
+```
 
-- Keep original scripts intact:
-  - `F:/LOCAL-DEV/system/usr/local/tornevall/nethandle`
-  - `F:/LOCAL-DEV/system/etc/firewall/gateway/run-nethandle`
-- Move device/user config out of script hardcoding into shared config files over time.
-- Expose controlled API endpoints for web, Android, and Google Home trigger paths.
+The PHP service contains no firewall logic.
 
-## Current script facts (as analyzed)
+## API
 
-- `nethandle` is the operator command surface (`<target> on|off [strict]`, or status).
-- `run-nethandle` applies firewall chains per user from resolver state files.
-- Resolver data currently lives in `system/etc/resolver`:
-  - `iplist.conf` (source domains)
-  - `iplist.resolved` (resolved CIDRs)
-  - `state-*` (per-user state)
+The service exposes one endpoint, `public/index.php`.
 
-## Proposed architecture (phase-by-phase)
+- Method: `POST`
+- Authentication header: `X-API-TOKEN`
+- Optional requester label: `X-Client-ID`
+- Body: JSON or normal form data
+- Fields:
+  - `target`: user/device target passed to nethandle
+  - `action`: `on`, `off`, or `status`
 
-1. **Execution adapter (Tools backend)**
-   - New service layer in Tools wraps script calls.
-   - No raw shell concatenation from user input.
-   - Allowlist targets/actions only.
+Example:
 
-2. **Shared config migration (non-breaking)**
-   - New config file for user/device mapping.
-   - Keep old scripts runnable while adding support for reading shared config.
-   - Keep `run-nethandle` path and behavior for router trigger compatibility.
+```bash
+curl --request POST \
+  --header 'X-API-TOKEN: replace-me' \
+  --header 'X-Client-ID: android-thomas' \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"thomas","action":"off"}' \
+  https://gateway.example.net/
+```
 
-3. **API contract (`/api/nethandle/*`)**
-   - `GET /api/nethandle/status`
-   - `POST /api/nethandle/targets/{target}/on`
-   - `POST /api/nethandle/targets/{target}/off`
-   - `POST /api/nethandle/targets/{target}/on-strict`
-   - Strict auth/permission gate and audit logging.
+Successful response:
 
-4. **Web UI (`projects/nethandle-ui`)**
-   - Device cards with real-time status.
-   - Per-device and per-user action buttons.
-   - Safety UX: confirm dialogs, command preview, last operation log.
+```json
+{
+  "ok": true,
+  "request_id": "0123456789abcdef",
+  "target": "thomas",
+  "action": "off",
+  "exit_code": 0,
+  "timed_out": false,
+  "output": []
+}
+```
 
-5. **Google Home bridge**
-   - Google Home API endpoints in Tools call same nethandle service layer.
-   - No duplicate shell execution path in Google-specific controllers.
+## Validation and execution safety
 
-## Security requirements (must-have)
+The endpoint deliberately has a very small input surface.
 
-- Permission gate on all mutating actions.
-- Server-side allowlist for target and action.
-- Timeout and fail-closed behavior for command execution.
-- Audit trail of actor, command intent, exit code, and result.
-- Optional execution lock to avoid concurrent conflicting runs.
+- Only POST is accepted.
+- `NETHANDLE_API_TOKEN` must be configured server-side.
+- The request token is compared using `hash_equals()`.
+- Targets are limited to `A-Z`, `a-z`, `0-9`, `_`, `.`, and `-`, maximum 64 characters.
+- Actions are hard-whitelisted to `on`, `off`, and `status`.
+- Optional `X-Client-ID` is restricted to a small safe character set.
+- All command arguments are shell-escaped before execution.
+- GNU `timeout` bounds every `nethandle` execution. The default deadline is 10 seconds and can be configured from 1 to 60 seconds.
+- Timeout exit code 124 is returned as HTTP 504 with `timed_out: true`.
 
-## Environment/config scaffold added in Tools
+## Audit
 
-The following env entries are now present for the upcoming implementation:
+`on` and `off` are always audited as JSON Lines records. The service writes an `intent` record before command execution and a `result` record after execution.
 
-- `NETHANDLE_EXEC_ENABLED`
-- `NETHANDLE_EXEC_BIN`
-- `NETHANDLE_APPLY_FW_BIN`
-- `NETHANDLE_RESOLVER_BASE`
-- `NETHANDLE_EXEC_TIMEOUT`
-- `NETHANDLE_EXEC_SUDO`
+Records include:
 
-And existing Google push entries for mobile notifications:
+- UTC timestamp
+- request ID
+- requester IP
+- optional client ID
+- target/action
+- exit code and timeout state for results
+- up to 50 output lines from the command
 
-- `GOOGLE_HOME_API_BASE_URL`
-- `GOOGLE_API_KEY`
-- `GOOGLE_HOMEGRAPH_BEARER`
-- `GOOGLE_HOME_TIMEOUT`
-- `GOOGLE_FCM_SERVER_KEY`
-- `GOOGLE_FCM_ENDPOINT`
+The default path is:
 
-## Next implementation milestone
+```text
+/var/log/nethandle-api/audit.log
+```
 
-- Build minimal `NethandleService` + `NethandleApiController` in Tools.
-- Add readonly status endpoint first.
-- Add one mutating endpoint (`off`) with strict guard and logging.
-- Wire first UI card in this project to the status endpoint.
+Create the directory before deployment and make it writable by the Apache account:
 
+```bash
+sudo install -d -o www-data -g www-data -m 0750 /var/log/nethandle-api
+sudo touch /var/log/nethandle-api/audit.log
+sudo chown www-data:www-data /var/log/nethandle-api/audit.log
+sudo chmod 0640 /var/log/nethandle-api/audit.log
+```
+
+If the initial audit intent cannot be persisted, a mutation is not executed. If the result record cannot be persisted after execution, the response explicitly reports `operation_executed: true` to discourage unsafe automatic retries.
+
+## Gateway installation
+
+Place the repository somewhere Apache can serve, for example:
+
+```text
+/var/www/nethandle
+```
+
+Configure Apache with `deploy/apache/nethandle.conf` as a baseline. At minimum set:
+
+```text
+NETHANDLE_API_TOKEN
+NETHANDLE_BIN
+NETHANDLE_SUDO_BIN
+NETHANDLE_TIMEOUT_BIN
+NETHANDLE_TIMEOUT_SECONDS
+NETHANDLE_AUDIT_LOG
+```
+
+The defaults in the PHP endpoint are:
+
+```text
+NETHANDLE_BIN=/usr/local/bin/nethandle
+NETHANDLE_SUDO_BIN=/usr/bin/sudo
+NETHANDLE_TIMEOUT_BIN=/usr/bin/timeout
+NETHANDLE_TIMEOUT_SECONDS=10
+NETHANDLE_AUDIT_LOG=/var/log/nethandle-api/audit.log
+```
+
+Use HTTPS when the endpoint is reachable over anything except a trusted isolated network.
+
+## Sudoers
+
+The Apache account only needs permission to execute the existing `nethandle` binary.
+
+Example file: `deploy/sudoers/nethandle`
+
+```text
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nethandle
+```
+
+Install it as `/etc/sudoers.d/nethandle` and validate before use:
+
+```bash
+visudo -cf /etc/sudoers.d/nethandle
+```
+
+Then verify execution from the Apache account:
+
+```bash
+sudo -u www-data sudo /usr/local/bin/nethandle thomas status
+```
+
+## Smoke test
+
+After deployment:
+
+```bash
+NETHANDLE_API_TOKEN='your-token' \
+NETHANDLE_TEST_TARGET='thomas' \
+BASE_URL='https://gateway.example.net/' \
+bash tests/smoke.sh
+```
+
+The smoke test intentionally only calls `status` so running it cannot disable a connection.
+
+## Next step
+
+Build the Android client as a similarly small application that stores the gateway URL/token and calls this endpoint directly for `on`, `off`, and `status`.
