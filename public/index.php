@@ -11,6 +11,16 @@ function respond(int $statusCode, array $payload): never
     exit;
 }
 
+function appendAudit(string $path, array $record): bool
+{
+    $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($line === false) {
+        return false;
+    }
+
+    return file_put_contents($path, $line . PHP_EOL, FILE_APPEND | LOCK_EX) !== false;
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     header('Allow: POST');
     respond(405, ['ok' => false, 'error' => 'method_not_allowed']);
@@ -48,9 +58,41 @@ if (!in_array($action, ['on', 'off', 'status'], true)) {
 
 $nethandleBin = getenv('NETHANDLE_BIN') ?: '/usr/local/bin/nethandle';
 $sudoBin = getenv('NETHANDLE_SUDO_BIN') ?: '/usr/bin/sudo';
+$timeoutBin = getenv('NETHANDLE_TIMEOUT_BIN') ?: '/usr/bin/timeout';
+$auditLog = getenv('NETHANDLE_AUDIT_LOG') ?: '/var/log/nethandle-api/audit.log';
+$timeoutSeconds = (int) (getenv('NETHANDLE_TIMEOUT_SECONDS') ?: '10');
+$timeoutSeconds = max(1, min(60, $timeoutSeconds));
+
+$requestId = bin2hex(random_bytes(8));
+$remoteAddress = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+$clientId = trim((string) ($_SERVER['HTTP_X_CLIENT_ID'] ?? ''));
+if ($clientId !== '' && !preg_match('/^[A-Za-z0-9_.:-]{1,64}$/', $clientId)) {
+    respond(400, ['ok' => false, 'error' => 'invalid_client_id']);
+}
+
+$isMutation = in_array($action, ['on', 'off'], true);
+$auditBase = [
+    'timestamp' => gmdate('c'),
+    'request_id' => $requestId,
+    'requester_ip' => $remoteAddress,
+    'client_id' => $clientId !== '' ? $clientId : null,
+    'target' => $target,
+    'action' => $action,
+];
+
+if ($isMutation && !appendAudit($auditLog, $auditBase + ['event' => 'intent'])) {
+    error_log(sprintf('nethandle audit write failed before execution request_id=%s', $requestId));
+    respond(500, [
+        'ok' => false,
+        'error' => 'audit_unavailable',
+        'request_id' => $requestId,
+    ]);
+}
 
 $command = sprintf(
-    '%s %s %s %s 2>&1',
+    '%s --signal=TERM --kill-after=2s %ds %s %s %s %s 2>&1',
+    escapeshellarg($timeoutBin),
+    $timeoutSeconds,
     escapeshellarg($sudoBin),
     escapeshellarg($nethandleBin),
     escapeshellarg($target),
@@ -60,11 +102,40 @@ $command = sprintf(
 $output = [];
 $exitCode = 1;
 exec($command, $output, $exitCode);
+$timedOut = $exitCode === 124;
 
-respond($exitCode === 0 ? 200 : 500, [
+if ($isMutation) {
+    $resultRecord = $auditBase + [
+        'timestamp' => gmdate('c'),
+        'event' => 'result',
+        'exit_code' => $exitCode,
+        'timed_out' => $timedOut,
+        'output' => array_slice($output, 0, 50),
+    ];
+
+    if (!appendAudit($auditLog, $resultRecord)) {
+        error_log(sprintf('nethandle audit result write failed request_id=%s exit_code=%d', $requestId, $exitCode));
+        respond(500, [
+            'ok' => false,
+            'error' => 'audit_write_failed',
+            'operation_executed' => true,
+            'request_id' => $requestId,
+            'target' => $target,
+            'action' => $action,
+            'exit_code' => $exitCode,
+            'timed_out' => $timedOut,
+        ]);
+    }
+}
+
+$statusCode = $timedOut ? 504 : ($exitCode === 0 ? 200 : 500);
+
+respond($statusCode, [
     'ok' => $exitCode === 0,
+    'request_id' => $requestId,
     'target' => $target,
     'action' => $action,
     'exit_code' => $exitCode,
+    'timed_out' => $timedOut,
     'output' => $output,
 ]);
