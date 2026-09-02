@@ -45,8 +45,8 @@ if (str_starts_with(strtolower($contentType), 'application/json')) {
     $input = $_POST;
 }
 
-$target = isset($input['target']) ? trim((string) $input['target']) : '';
-$action = isset($input['action']) ? strtolower(trim((string) $input['action'])) : '';
+$target = strtolower(isset($input['target']) ? trim((string) $input['target']) : '');
+$action = strtolower(isset($input['action']) ? strtolower(trim((string) $input['action'])) : '');
 
 if ($target === '' || !preg_match('/^[A-Za-z0-9_.-]{1,64}$/', $target)) {
     respond(400, ['ok' => false, 'error' => 'invalid_target']);
@@ -56,7 +56,7 @@ if (!in_array($action, ['on', 'off', 'status'], true)) {
     respond(400, ['ok' => false, 'error' => 'invalid_action']);
 }
 
-$nethandleBin = getenv('NETHANDLE_BIN') ?: '/usr/local/bin/nethandle';
+$nethandleBin = getenv('NETHANDLE_BIN') ?: '/usr/local/tornevall/nethandle';
 $sudoBin = getenv('NETHANDLE_SUDO_BIN') ?: '/usr/bin/sudo';
 $timeoutBin = getenv('NETHANDLE_TIMEOUT_BIN') ?: '/usr/bin/timeout';
 $auditLog = getenv('NETHANDLE_AUDIT_LOG') ?: '/var/log/nethandle-api/audit.log';
