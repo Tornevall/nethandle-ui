@@ -1,5 +1,12 @@
 # nethandle-ui Changelog
 
+## 2026-09-02
+
+- Changed the read-only `status` action to execute bare `nethandle`, matching the command's actual status interface.
+- Added machine-readable parsing of user mode, profile, and devices to status responses.
+- Made `target` optional for status requests while keeping it mandatory for `on` and `off`.
+- Updated the smoke test to request full read-only status without a target.
+
 ## 2026-08-29
 
 - Added standalone PHP web service for `nethandle <target> on|off|status`.
