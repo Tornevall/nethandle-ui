@@ -21,6 +21,65 @@ function appendAudit(string $path, array $record): bool
     return file_put_contents($path, $line . PHP_EOL, FILE_APPEND | LOCK_EX) !== false;
 }
 
+function parseNethandleStatus(array $output): array
+{
+    $users = [];
+    $currentUser = null;
+    $inDevices = false;
+
+    foreach ($output as $line) {
+        $trimmed = trim((string) $line);
+
+        if (preg_match('/^User:\s+([A-Za-z0-9_.-]{1,64})$/', $trimmed, $matches) === 1) {
+            $currentUser = $matches[1];
+            $users[$currentUser] = [
+                'name' => $currentUser,
+                'mode' => null,
+                'profile' => null,
+                'devices' => [],
+            ];
+            $inDevices = false;
+            continue;
+        }
+
+        if ($currentUser === null) {
+            continue;
+        }
+
+        if (preg_match('/^Mode:\s+(.+)$/', $trimmed, $matches) === 1) {
+            $users[$currentUser]['mode'] = strtoupper(trim($matches[1]));
+            $inDevices = false;
+            continue;
+        }
+
+        if (preg_match('/^Profile:\s+(.+)$/', $trimmed, $matches) === 1) {
+            $users[$currentUser]['profile'] = strtoupper(trim($matches[1]));
+            $inDevices = false;
+            continue;
+        }
+
+        if ($trimmed === 'Devices:') {
+            $inDevices = true;
+            continue;
+        }
+
+        if ($trimmed === 'Usage:' || $trimmed === 'Users:' || $trimmed === 'Devices:') {
+            $currentUser = null;
+            $inDevices = false;
+            continue;
+        }
+
+        if ($inDevices && preg_match('/^-\s+([A-Za-z0-9_.-]{1,64})\s+\(([^)]+)\)$/', $trimmed, $matches) === 1) {
+            $users[$currentUser]['devices'][] = [
+                'name' => $matches[1],
+                'ip' => trim($matches[2]),
+            ];
+        }
+    }
+
+    return array_values($users);
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     header('Allow: POST');
     respond(405, ['ok' => false, 'error' => 'method_not_allowed']);
@@ -45,15 +104,17 @@ if (str_starts_with(strtolower($contentType), 'application/json')) {
     $input = $_POST;
 }
 
-$target = isset($input['target']) ? trim((string) $input['target']) : '';
 $action = isset($input['action']) ? strtolower(trim((string) $input['action'])) : '';
-
-if ($target === '' || !preg_match('/^[A-Za-z0-9_.-]{1,64}$/', $target)) {
-    respond(400, ['ok' => false, 'error' => 'invalid_target']);
-}
-
 if (!in_array($action, ['on', 'off', 'status'], true)) {
     respond(400, ['ok' => false, 'error' => 'invalid_action']);
+}
+
+$target = isset($input['target']) ? trim((string) $input['target']) : '';
+if ($action !== 'status' && ($target === '' || !preg_match('/^[A-Za-z0-9_.-]{1,64}$/', $target))) {
+    respond(400, ['ok' => false, 'error' => 'invalid_target']);
+}
+if ($target !== '' && !preg_match('/^[A-Za-z0-9_.-]{1,64}$/', $target)) {
+    respond(400, ['ok' => false, 'error' => 'invalid_target']);
 }
 
 $nethandleBin = getenv('NETHANDLE_BIN') ?: '/usr/local/bin/nethandle';
@@ -76,7 +137,7 @@ $auditBase = [
     'request_id' => $requestId,
     'requester_ip' => $remoteAddress,
     'client_id' => $clientId !== '' ? $clientId : null,
-    'target' => $target,
+    'target' => $target !== '' ? $target : null,
     'action' => $action,
 ];
 
@@ -89,15 +150,19 @@ if ($isMutation && !appendAudit($auditLog, $auditBase + ['event' => 'intent'])) 
     ]);
 }
 
-$command = sprintf(
-    '%s --signal=TERM --kill-after=2s %ds %s %s %s %s 2>&1',
-    escapeshellarg($timeoutBin),
-    $timeoutSeconds,
-    escapeshellarg($sudoBin),
-    escapeshellarg($nethandleBin),
-    escapeshellarg($target),
-    escapeshellarg($action)
-);
+$commandParts = [
+    $timeoutBin,
+    '--signal=TERM',
+    '--kill-after=2s',
+    $timeoutSeconds . 's',
+    $sudoBin,
+    $nethandleBin,
+];
+if ($action !== 'status') {
+    $commandParts[] = $target;
+    $commandParts[] = $action;
+}
+$command = implode(' ', array_map('escapeshellarg', $commandParts)) . ' 2>&1';
 
 $output = [];
 $exitCode = 1;
@@ -129,13 +194,18 @@ if ($isMutation) {
 }
 
 $statusCode = $timedOut ? 504 : ($exitCode === 0 ? 200 : 500);
-
-respond($statusCode, [
+$response = [
     'ok' => $exitCode === 0,
     'request_id' => $requestId,
-    'target' => $target,
+    'target' => $target !== '' ? $target : null,
     'action' => $action,
     'exit_code' => $exitCode,
     'timed_out' => $timedOut,
     'output' => $output,
-]);
+];
+
+if ($action === 'status' && $exitCode === 0) {
+    $response['users'] = parseNethandleStatus($output);
+}
+
+respond($statusCode, $response);
