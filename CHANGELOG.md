@@ -1,5 +1,13 @@
 # nethandle-ui Changelog
 
+## 2026-09-02
+
+- Added machine-readable full status from bare `nethandle` output.
+- Made `target` optional for read-only status requests while keeping it mandatory for mutations.
+- Normalized incoming targets to lowercase before invoking nethandle.
+- Aligned default deployment paths with `/usr/local/tornevall/nethandle`.
+- Updated the smoke test to request full read-only status.
+
 ## 2026-08-29
 
 - Added standalone PHP web service for `nethandle <target> on|off|status`.
