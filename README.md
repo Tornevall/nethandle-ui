@@ -2,12 +2,19 @@
 
 Minimal gateway-side web bridge for the existing `nethandle` command.
 
-The first implementation is intentionally independent of Laravel and ToolsAPI. Apache/PHP receives a small authenticated request and executes the already existing operator command:
+The implementation is intentionally independent of Laravel and ToolsAPI. Apache/PHP receives a small authenticated request and executes the already existing operator command.
+
+Mutating requests execute:
 
 ```text
 nethandle <target> on
 nethandle <target> off
-nethandle <target> status
+```
+
+Status requests execute the command without arguments:
+
+```text
+nethandle
 ```
 
 The PHP service contains no firewall logic.
@@ -21,10 +28,10 @@ The service exposes one endpoint, `public/index.php`.
 - Optional requester label: `X-Client-ID`
 - Body: JSON or normal form data
 - Fields:
-  - `target`: user/device target passed to nethandle
   - `action`: `on`, `off`, or `status`
+  - `target`: required for `on` and `off`; optional for `status`
 
-Example:
+Mutation example:
 
 ```bash
 curl --request POST \
@@ -35,7 +42,7 @@ curl --request POST \
   https://gateway.example.net/
 ```
 
-Successful response:
+Successful mutation response:
 
 ```json
 {
@@ -49,6 +56,36 @@ Successful response:
 }
 ```
 
+Current status example:
+
+```bash
+curl --request POST \
+  --header 'X-API-TOKEN: replace-me' \
+  --header 'X-Client-ID: android-thomas' \
+  --header 'Content-Type: application/json' \
+  --data '{"action":"status"}' \
+  https://gateway.example.net/
+```
+
+A successful status request executes bare `nethandle`, preserves the command output, and also returns parsed user state suitable for clients:
+
+```json
+{
+  "ok": true,
+  "action": "status",
+  "users": [
+    {
+      "name": "emily",
+      "mode": "ON",
+      "profile": "FULL",
+      "devices": [
+        {"name": "emily-main", "ip": "10.1.1.53"}
+      ]
+    }
+  ]
+}
+```
+
 ## Validation and execution safety
 
 The endpoint deliberately has a very small input surface.
@@ -58,8 +95,9 @@ The endpoint deliberately has a very small input surface.
 - The request token is compared using `hash_equals()`.
 - Targets are limited to `A-Z`, `a-z`, `0-9`, `_`, `.`, and `-`, maximum 64 characters.
 - Actions are hard-whitelisted to `on`, `off`, and `status`.
+- `target` is required for `on` and `off`. Status runs bare `nethandle` and therefore does not require a target.
 - Optional `X-Client-ID` is restricted to a small safe character set.
-- All command arguments are shell-escaped before execution.
+- Every command component is shell-escaped before execution.
 - GNU `timeout` bounds every `nethandle` execution. The default deadline is 10 seconds and can be configured from 1 to 60 seconds.
 - Timeout exit code 124 is returned as HTTP 504 with `timed_out: true`.
 
@@ -141,10 +179,10 @@ Install it as `/etc/sudoers.d/nethandle` and validate before use:
 visudo -cf /etc/sudoers.d/nethandle
 ```
 
-Then verify execution from the Apache account:
+Then verify read-only status execution from the Apache account:
 
 ```bash
-sudo -u www-data sudo /usr/local/bin/nethandle thomas status
+sudo -u www-data sudo /usr/local/bin/nethandle
 ```
 
 ## Smoke test
@@ -153,13 +191,8 @@ After deployment:
 
 ```bash
 NETHANDLE_API_TOKEN='your-token' \
-NETHANDLE_TEST_TARGET='thomas' \
 BASE_URL='https://gateway.example.net/' \
 bash tests/smoke.sh
 ```
 
-The smoke test intentionally only calls `status` so running it cannot disable a connection.
-
-## Next step
-
-Build the Android client as a similarly small application that stores the gateway URL/token and calls this endpoint directly for `on`, `off`, and `status`.
+The smoke test intentionally only calls the read-only full status action so running it cannot disable a connection.
